@@ -74,7 +74,8 @@ class VAE_MLP(nn.Module):
             if normalization == 'batch':
                 self.encoder.add_module(name="N{:d}".format(i), module=nn.BatchNorm1d(hidden_dim))
             elif normalization == 'layer':
-                self.encoder.add_module(name="N{:d}".format(i), module=nn.LayerNorm(hidden_dim))
+                self.encoder.add_module(name="N{:d}".format(i),
+                                        module=nn.LayerNorm(hidden_dim, elementwise_affine=False))
             self.encoder.add_module(name="A{:d}".format(i), module=nn.LeakyReLU(.2))
             if dropout > 0:
                 self.encoder.add_module(name="D{:d}".format(i), module=nn.Dropout(p=dropout))
@@ -89,7 +90,8 @@ class VAE_MLP(nn.Module):
             if normalization == 'batch':
                 self.decoder.add_module(name="N{:d}".format(i), module=nn.BatchNorm1d(hidden_dim))
             elif normalization == 'layer':
-                self.decoder.add_module(name="N{:d}".format(i), module=nn.LayerNorm(hidden_dim))
+                self.decoder.add_module(name="N{:d}".format(i),
+                                        module=nn.LayerNorm(hidden_dim, elementwise_affine=False))
             self.decoder.add_module(name="A{:d}".format(i), module=nn.LeakyReLU(.2))
             if dropout > 0:
                 self.decoder.add_module(name="D{:d}".format(i), module=nn.Dropout(p=dropout))
@@ -104,7 +106,7 @@ class VAE_MLP(nn.Module):
         else:
             raise NotImplementedError
 
-        self.weight_init()
+        # self.weight_init()
 
     def weight_init(self):
         for block in self._modules:
@@ -547,11 +549,13 @@ class iVAE(nn.Module):
     def loss(self, x, domain, label=None):
         if self.recon_loss in ['nb', 'zinb']:
             x = torch.log(x + 1)
+        domain = domain.type(torch.int64)
+        # domain = domain[label > -1]
+        # x = x[label > -1, :]
         if self.c_dim > 0 and self.lambda_spar > 0:
             x_recon, mu, logvar, z, jacobian_matrix = self.net(x, jacobian_computation=True)
         else:
             x_recon, mu, logvar, z, jacobian_matrix = self.net(x, jacobian_computation=False)
-        domain = domain.type(torch.int64)
         q_dist = Normal(mu, torch.exp(logvar / 2))
         log_qz = q_dist.log_prob(z)
 

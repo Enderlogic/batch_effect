@@ -57,7 +57,7 @@ for data_name in dataset:
             target_adata = adata[adata.obs['query']].copy()
             train_data.obs.loc[adata.obs['query'], label] = np.nan
             model = iVAE(latent_dim=10, s_prop=.2, data_dim=adata.shape[1], domain_dim=adata.obs[batch].nunique(),
-                         label_dim=adata.obs[label].nunique(), embedding_dim=5, dr_rate=0.05, hidden_dim=32, n_layers=1,
+                         label_dim=adata.obs[label].nunique(), embedding_dim=5, dr_rate=0.05, hidden_dim=32, n_layers=0,
                          flows_n_layers=4, max_epochs=100, learning_rate=1e-3, recon_loss='nb', normalisation='layer',
                          lambda_kl=1, lambda_clas=10, lambda_spar=0, lambda_mask=0, patient=10, valid_prop=.1,
                          batch_size=128, pretrain_epoch_rate=1, full_embedding=True, flows=None)
