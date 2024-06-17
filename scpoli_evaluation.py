@@ -1,7 +1,6 @@
 import os
 import pickle
 import random
-import time
 
 import pandas
 import scanpy as sc
@@ -12,6 +11,7 @@ from sklearn.metrics import f1_score
 from torch.utils.data import DataLoader
 
 from utils.utils import TrainDataset
+
 sc.set_figure_params(scanpy=True, fontsize=6)
 
 dataset = ['pancreas', 'lung', 'immune', 'brain']
@@ -36,52 +36,50 @@ for data_name in dataset:
     batch = batch_dict[data_name]
     label = label_dict[data_name]
     for qp in query_proportion_list:
-        if round(adata.obs[batch].nunique() * qp) == 1:
-            continue
-        query = random.sample(adata.obs[batch].unique().tolist(), round(adata.obs[batch].nunique() * qp))
-        metadata['data'].append(data_name)
-        metadata['query proportion'].append(qp)
-        metadata['target domain'].append(query)
-        source_adata = adata[~adata.obs[batch].isin(query)].copy()
-        target_adata = adata[adata.obs[batch].isin(query)].copy()
+        if round(adata.obs[batch].nunique() * qp) > 1:
+            query = random.sample(adata.obs[batch].unique().tolist(), round(adata.obs[batch].nunique() * qp))
+            metadata['data'].append(data_name)
+            metadata['query proportion'].append(qp)
+            metadata['target domain'].append(query)
+            source_adata = adata[~adata.obs[batch].isin(query)].copy()
+            target_adata = adata[adata.obs[batch].isin(query)].copy()
 
-        train_data = TrainDataset(source_adata, batch, label)
-        train_loader = DataLoader(train_data, shuffle=True, batch_size=100)
-        start = time.time()
-        scpoli_model = scPoli(adata=source_adata, condition_keys=batch, cell_type_keys=label, embedding_dims=5,
-                              latent_dim=10, hidden_layer_sizes=[64])
-        scpoli_model.train(eta=10, n_epochs=100)
-        scpoli_query = scPoli.load_query_data(adata=target_adata, reference_model=scpoli_model,
-                                              labeled_indices=[])
-        scpoli_query.train(eta=10, n_epochs=100)
-        cost = time.time() - start
+            train_data = TrainDataset(source_adata, batch, label)
+            train_loader = DataLoader(train_data, shuffle=True, batch_size=100)
+            scpoli_model = scPoli(adata=source_adata, condition_keys=batch, cell_type_keys=label, embedding_dims=5,
+                                  latent_dim=10, hidden_layer_sizes=[64])
+            scpoli_model.train(eta=10, n_epochs=50, pretraining_epochs=50)
+            scpoli_query = scPoli.load_query_data(adata=target_adata, reference_model=scpoli_model,
+                                                  labeled_indices=[])
+            scpoli_query.train(eta=10, n_epochs=50, pretraining_epochs=50)
 
-        scpoli_query.model.eval()
-        # get latent representation of query data
-        target_adata.obsm['scpoli'] = scpoli_query.get_latent(target_adata)
-        result_data_path = '../batch_effect_data/' + data_name + '/' + str(qp) + '/scpoli.h5ad'
-        os.makedirs(os.path.dirname(result_data_path), exist_ok=True)
-        target_adata.write_h5ad(result_data_path)
-        m = metrics(target_adata, target_adata, batch, label, embed='scpoli', ari_=True, silhouette_=True,
-                    isolated_labels_asw_=True, nmi_=True, pcr_=True, graph_conn_=True).T
-        y_true = target_adata.obs[label]
-        y_pred = scpoli_query.classify(target_adata, scale_uncertainties=True)[label]["preds"]
-        f1_weighted = f1_score(y_true, y_pred, average='weighted')
-        f1_macro = f1_score(y_true, y_pred, average='macro')
+            scpoli_query.model.eval()
+            # get latent representation of query data
+            target_adata.obsm['scpoli'] = scpoli_query.get_latent(target_adata)
+            result_data_path = '../batch_effect_data/' + data_name + '/' + str(qp) + '/scpoli.h5ad'
+            os.makedirs(os.path.dirname(result_data_path), exist_ok=True)
+            target_adata.write_h5ad(result_data_path)
+            m = metrics(target_adata, target_adata, batch, label, embed='scpoli', ari_=True, silhouette_=True,
+                        isolated_labels_asw_=True, nmi_=True, pcr_=True, graph_conn_=True).T
+            y_true = target_adata.obs[label]
+            y_pred = scpoli_query.classify(target_adata, scale_uncertainties=True)[label]["preds"]
+            f1_weighted = f1_score(y_true, y_pred, average='weighted')
+            f1_macro = f1_score(y_true, y_pred, average='macro')
 
-        result.loc[len(result.index)] = [data_name, qp, m['NMI_cluster/label'][0], m['ARI_cluster/label'][0],
-                                         m['ASW_label'][0], m['ASW_label/batch'][0], m['PCR_batch'][0],
-                                         m['isolated_label_silhouette'][0], m['graph_conn'][0], m.mean().mean(),
-                                         f1_weighted, f1_macro, cost]
-        print(result.tail(1).to_string())
-        plot_folder = 'result/plot/' + data_name + '/' + str(qp) + '/'
-        sc.settings.figdir = plot_folder
-        sc.tl.tsne(target_adata, use_rep='scpoli')
-        os.makedirs(os.path.dirname(plot_folder), exist_ok=True)
-        sc.pl.tsne(target_adata, color=batch, legend_fontsize=9, title='batch, score=' + str(m.mean().mean()),
-                   save='_scpoli_batch.pdf')
-        sc.pl.tsne(target_adata, color=label, legend_fontsize=9, title='label, score=' + str(m.mean().mean()),
-                   save='_scpoli_label.pdf')
-        result.to_csv(result_path, index=False)
-        with open(metadata_path, 'wb') as fp:
-            pickle.dump(metadata, fp)
+            result.loc[len(result.index)] = [data_name, qp, m['NMI_cluster/label'][0], m['ARI_cluster/label'][0],
+                                             m['ASW_label'][0], m['ASW_label/batch'][0], m['PCR_batch'][0],
+                                             m['isolated_label_silhouette'][0], m['graph_conn'][0], m.mean().mean(),
+                                             f1_weighted, f1_macro,
+                                             scpoli_model.trainer.training_time + scpoli_query.trainer.training_time]
+            print(result.tail(1).to_string())
+            plot_folder = 'result/plot/' + data_name + '/' + str(qp) + '/'
+            sc.settings.figdir = plot_folder
+            sc.tl.tsne(target_adata, use_rep='scpoli')
+            os.makedirs(os.path.dirname(plot_folder), exist_ok=True)
+            sc.pl.tsne(target_adata, color=batch, legend_fontsize=9, title='batch, score=' + str(m.mean().mean()),
+                       save='_scpoli_batch.pdf')
+            sc.pl.tsne(target_adata, color=label, legend_fontsize=9, title='label, score=' + str(m.mean().mean()),
+                       save='_scpoli_label.pdf')
+            result.to_csv(result_path, index=False)
+            with open(metadata_path, 'wb') as fp:
+                pickle.dump(metadata, fp)

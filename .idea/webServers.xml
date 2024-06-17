@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="WebServers">
+    <option name="servers">
+      <webServer id="5049ea40-dd15-4b53-ab1a-4b341f7e0816" name="gpuhome">
+        <fileTransfer accessType="SFTP" host="gpuhome.comp.hkbu.edu.hk" port="22" sshConfigId="0273ba16-9036-428a-86d6-3baa0023ea8a" sshConfig="yangliu1214@gpuhome.comp.hkbu.edu.hk:22 password">
+          <advancedOptions>
+            <advancedOptions dataProtectionLevel="Private" keepAliveTimeout="0" passiveMode="true" shareSSLContext="true" />
+          </advancedOptions>
+        </fileTransfer>
+      </webServer>
+    </option>
+  </component>
+</project>

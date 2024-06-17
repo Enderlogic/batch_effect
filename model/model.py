@@ -68,14 +68,14 @@ class VAE_MLP(nn.Module):
         # encoder
         self.encoder = nn.Sequential()
         self.encoder.add_module(name="Input L", module=nn.Linear(data_dim, hidden_dim))
-        self.encoder.add_module(name="Input A", module=nn.ReLU())
+        self.encoder.add_module(name="Input A", module=nn.LeakyReLU(.2))
         for i in range(n_layers):
             self.encoder.add_module(name="L{:d}".format(i), module=nn.Linear(hidden_dim, hidden_dim))
             if normalization == 'batch':
                 self.encoder.add_module(name="N{:d}".format(i), module=nn.BatchNorm1d(hidden_dim))
             elif normalization == 'layer':
                 self.encoder.add_module(name="N{:d}".format(i), module=nn.LayerNorm(hidden_dim))
-            self.encoder.add_module(name="A{:d}".format(i), module=nn.ReLU())
+            self.encoder.add_module(name="A{:d}".format(i), module=nn.LeakyReLU(.2))
             if dropout > 0:
                 self.encoder.add_module(name="D{:d}".format(i), module=nn.Dropout(p=dropout))
         self.encoder.add_module(name='Output', module=nn.Linear(hidden_dim, latent_dim * 2))
@@ -83,14 +83,14 @@ class VAE_MLP(nn.Module):
         # Fix the functional form to ground-truth mixing function
         self.decoder = nn.Sequential()
         self.decoder.add_module(name="Input L", module=nn.Linear(latent_dim, hidden_dim))
-        self.decoder.add_module(name="Input A", module=nn.ReLU())
+        self.decoder.add_module(name="Input A", module=nn.LeakyReLU(.2))
         for i in range(n_layers):
             self.decoder.add_module(name="L{:d}".format(i), module=nn.Linear(hidden_dim, hidden_dim))
             if normalization == 'batch':
                 self.decoder.add_module(name="N{:d}".format(i), module=nn.BatchNorm1d(hidden_dim))
             elif normalization == 'layer':
                 self.decoder.add_module(name="N{:d}".format(i), module=nn.LayerNorm(hidden_dim))
-            self.decoder.add_module(name="A{:d}".format(i), module=nn.ReLU())
+            self.decoder.add_module(name="A{:d}".format(i), module=nn.LeakyReLU(.2))
             if dropout > 0:
                 self.decoder.add_module(name="D{:d}".format(i), module=nn.Dropout(p=dropout))
         if recon_loss == 'zinb':
@@ -104,7 +104,7 @@ class VAE_MLP(nn.Module):
         else:
             raise NotImplementedError
 
-        # self.weight_init()
+        self.weight_init()
 
     def weight_init(self):
         for block in self._modules:
@@ -243,7 +243,7 @@ class iVAE_flow_unsupervised(nn.Module):
                  dr_rate: float = 0.05, hidden_dim=None, n_layers: int = 6, flows_n_layers: int = 4,
                  max_epochs: int = 100, learning_rate: float = 1e-3, recon_loss: str = 'mse',
                  normalisation='batch', lambda_kl: float = .1, lambda_spar: float = .1, lambda_mask: float = 1,
-                 patient: int = 10, valid_prop: float = .1, batch_size: int = 100, flows: str = 'quadraticspine'):
+                 patient: int = 10, valid_prop: float = .1, batch_size: int = 100, flows: str = 'quadraticspline'):
         super().__init__()
         self.best_state_dict = None
         self.data_dim = data_dim
@@ -275,8 +275,7 @@ class iVAE_flow_unsupervised(nn.Module):
 
         # decoder params
         self.net = VAE_MLP(data_dim=data_dim, latent_dim=latent_dim, c_dim=self.c_dim, hidden_dim=self.hidden_dim,
-                           encoder_n_layers=n_layers, decoder_n_layers=n_layers,
-                           normalization=normalisation, dropout=dr_rate, recon_loss=recon_loss)
+                           n_layers=n_layers, normalization=normalisation, dropout=dr_rate, recon_loss=recon_loss)
         self.domain_embedding = nn.Embedding(self.domain_dim, self.embedding_dim)
 
         # normalising flows
@@ -287,7 +286,7 @@ class iVAE_flow_unsupervised(nn.Module):
             self.domain_mlp = MLP(self.embedding_dim, domain_num_params)
         elif flows == 'condspline':
             self.domain_flows = ConditionalFlow(self.s_dim, self.embedding_dim)
-        elif flows == 'quadraticspine':
+        elif flows == 'quadraticspline':
             flows = []
             for i in range(flows_n_layers):
                 flows += [nf.flows.AutoregressiveRationalQuadraticSpline(self.s_dim, 2, self.hidden_dim,
@@ -457,10 +456,11 @@ class iVAE(nn.Module):
                  flows_n_layers: int = 4, max_epochs: int = 100, learning_rate: float = 1e-3, recon_loss: str = 'mse',
                  normalisation='batch', lambda_kl: float = .1, lambda_clas: float = 1, lambda_spar: float = .1,
                  lambda_mask: float = 1, patient: int = 10, valid_prop: float = .1, batch_size: int = 100,
-                 pretrain_epoch_rate: float = .9, full_embedding=True):
+                 pretrain_epoch_rate: float = .9, full_embedding=True, flows='spline'):
         super().__init__()
         self.iter_logs = defaultdict(list)
         self.logs = defaultdict(list)
+        self.test = defaultdict(list)
         self.best_state_dict = None
         self.data_dim = data_dim
         self.latent_dim = latent_dim
@@ -474,11 +474,12 @@ class iVAE(nn.Module):
         self.label_dim = label_dim
         self.embedding_dim = embedding_dim
         self.recon_loss = recon_loss
-        self.theta = torch.nn.Parameter(torch.randn(self.data_dim, self.domain_dim)) if recon_loss in ["nb",
-                                                                                                       "zinb"] else None
+        self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+        self.theta = torch.nn.Parameter(
+            torch.randn(self.data_dim, self.domain_dim, device=self.device)) if recon_loss in ["nb", "zinb"] else None
         self.dr_rate = dr_rate
         self.hidden_dim = int(np.ceil(np.sqrt(data_dim))) if hidden_dim is None else hidden_dim
-        self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+        self.num_workers = 0 if self.device.type == 'cpu' else 0
         self.max_epochs = max_epochs
         self.lr = learning_rate
         self.epsilon = 1e-4
@@ -496,18 +497,29 @@ class iVAE(nn.Module):
 
         # decoder params
         self.net = VAE_MLP(data_dim=data_dim, latent_dim=latent_dim, c_dim=self.c_dim, hidden_dim=self.hidden_dim,
-                           n_layers=n_layers, normalization=normalisation, dropout=dr_rate, recon_loss=recon_loss).to(
-            self.device)
-        self.domain_embedding = nn.Embedding(self.domain_dim, self.embedding_dim, device=self.device)
-
-        # normalising flows
-        flows = []
-        for i in range(flows_n_layers):
-            flows += [nf.flows.AutoregressiveRationalQuadraticSpline(self.s_dim, 2, self.hidden_dim,
-                                                                     num_context_channels=self.embedding_dim),
-                      nf.flows.LULinearPermute(self.s_dim)]
-        self.domain_flows = nf.ConditionalNormalizingFlow(
-            nf.distributions.DiagGaussian(self.s_dim, trainable=False), flows).to(self.device)
+                           n_layers=n_layers, normalization=normalisation, dropout=dr_rate, recon_loss=recon_loss,
+                           device=self.device).to(self.device)
+        if flows == 'quadraticspline':
+            self.domain_embedding = nn.Embedding(self.domain_dim, self.embedding_dim, device=self.device)
+        self.flows = flows
+        if flows == 'quadraticspline':
+            flows = []
+            for i in range(flows_n_layers):
+                flows += [nf.flows.AutoregressiveRationalQuadraticSpline(self.s_dim, 2, self.hidden_dim,
+                                                                         num_context_channels=self.embedding_dim),
+                          nf.flows.LULinearPermute(self.s_dim)]
+            self.domain_flows = nf.ConditionalNormalizingFlow(
+                nf.distributions.DiagGaussian(self.s_dim, trainable=False).to(self.device), flows).to(self.device)
+        elif flows == 'spline':
+            # Spline flow model to learn the noise distribution
+            self.domain_flows = []
+            for i in range(self.domain_dim):
+                spline = NormalizingFlow(input_dim=self.s_dim, n_layers=flows_n_layers, bound=5, count_bins=8,
+                                         order='linear')
+                self.domain_flows.append(spline)
+            self.domain_flows = nn.ModuleList(self.domain_flows).to(self.device)
+        else:
+            self.domain_flows = None
 
         self.prior_dist_zs = MultivariateNormal(torch.zeros(self.s_dim, device=self.device),
                                                 torch.eye(self.s_dim, device=self.device))
@@ -519,8 +531,17 @@ class iVAE(nn.Module):
             self.prototypes = torch.zeros(label_dim, self.c_dim, device=self.device)
 
     def nf(self, z, domain):
-        domain_embed = self.domain_embedding(domain)
-        tilde_zs, logdet = self.domain_flows.forward_and_log_det(z, domain_embed)
+        if self.flows == 'quadraticspline':
+            domain_embed = self.domain_embedding(domain)
+            tilde_zs, logdet = self.domain_flows.inverse_and_log_det(z, domain_embed)
+        elif self.flows == 'spline':
+            tilde_zs = torch.zeros_like(z)
+            logdet = torch.zeros((z.shape[0],), device=self.device)
+            for id in domain.unique():
+                index = domain == id
+                tilde_zs[index, :], logdet[index] = self.domain_flows[id](z[index])
+        else:
+            return z, None
         return tilde_zs, logdet
 
     def loss(self, x, domain, label=None):
@@ -529,7 +550,7 @@ class iVAE(nn.Module):
         if self.c_dim > 0 and self.lambda_spar > 0:
             x_recon, mu, logvar, z, jacobian_matrix = self.net(x, jacobian_computation=True)
         else:
-            x_recon, mu, logvar, z, jacobian_matrix = self.net(x)
+            x_recon, mu, logvar, z, jacobian_matrix = self.net(x, jacobian_computation=False)
         domain = domain.type(torch.int64)
         q_dist = Normal(mu, torch.exp(logvar / 2))
         log_qz = q_dist.log_prob(z)
@@ -540,18 +561,21 @@ class iVAE(nn.Module):
         zs = z[:, self.c_dim:]
 
         # pass zs to a normalizing flow to obtain zs tilde
+        # start = time.time()
         zs_tilde, logdet_zs = self.nf(zs, domain)
+        # self.test['zs_tilde'].append(time.time() - start)
         embed = torch.concat((zc, zs_tilde), dim=1) if self.full_embedding else zc
         # calculate kl divergence loss for zs_tilde
         log_qzs = log_qz[:, self.c_dim:].sum(1)
-        log_pzs = self.prior_dist_zs.log_prob(zs_tilde) + logdet_zs
+        log_pzs = self.prior_dist_zs.log_prob(zs_tilde)
+        if logdet_zs is not None:
+            log_pzs += logdet_zs
         kl_zs = (log_qzs - log_pzs).mean()
         # calculate kl divergence loss for zc
         log_qzc = log_qz[:, :self.c_dim].sum(1)
         log_pzc = Normal(torch.zeros_like(zc), torch.ones_like(zc)).log_prob(zc).sum(1)
         kl_zc = (log_qzc - log_pzc).mean()
         loss_kl = kl_zc + kl_zs
-
         # calculate reconstruction loss
         if self.recon_loss == 'mse':
             loss_recon = nn.functional.mse_loss(x_recon, x, reduction='none').sum(1).mean()
@@ -573,13 +597,11 @@ class iVAE(nn.Module):
         loss_spar = jacobian_matrix.abs().mean(
             1).sum() * self.lambda_spar if self.c_dim > 0 and self.lambda_spar > 0 else torch.tensor(0.,
                                                                                                      device=self.device)
-
         # calculate prototype loss
         loss_clas = sum([(embed[label == i, :] - self.prototypes[i, :]).pow(2).sum(1).sqrt().mean() for i in
                          label.unique()[
                              label.unique() != -1]]) * self.lambda_clas if self.epoch >= self.pretrain_epochs and self.lambda_clas > 0 else torch.tensor(
             0., device=self.device)
-
         # calculate mask loss for zc
         loss_mask = self.importance.abs().sum() * self.lambda_mask if self.lambda_mask > 0 else torch.tensor(0.,
                                                                                                              device=self.device)
@@ -606,7 +628,7 @@ class iVAE(nn.Module):
     def fit(self, adata, domain_name, label_name):
         dataset = DatasetVAE(adata, domain_name, label_name)
         train_data, valid_data = random_split(dataset, [1 - self.valid_prop, self.valid_prop])
-        train_loader = DataLoader(train_data, shuffle=True, batch_size=self.batch_size)
+        train_loader = DataLoader(train_data, shuffle=True, batch_size=self.batch_size, num_workers=self.num_workers)
         valid_data = valid_data.dataset[valid_data.indices]
         valid_adata = anndata.AnnData(valid_data['x'].numpy())
         valid_adata.obs['domain'] = valid_data['domain'].numpy()
@@ -617,18 +639,28 @@ class iVAE(nn.Module):
         optimizer = torch.optim.AdamW(filter(lambda p: p.requires_grad, self.parameters()), lr=self.lr,
                                       betas=(0.9, 0.999), weight_decay=0.0001)
         for self.epoch in range(self.max_epochs):
-            start = time.time()
+            # start = time.time()
             if self.epoch == self.pretrain_epochs and self.lambda_clas > 0:
                 self.update_prototype(train_data.dataset)
                 self.best_performance = np.inf
             self.iter_logs = defaultdict(list)
+            self.test = defaultdict(list)
+            # cost_begin = time.time() - start
+            # cost_loss = 0
+            # cost_optimizer = 0
             self.train()
             for _, data in enumerate(train_loader):
+                # start = time.time()
                 loss = self.loss(data['x'].to(self.device), data['domain'].to(self.device),
                                  data['label'].to(self.device))
+                # cost_loss += time.time() - start
+                # start = time.time()
                 optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()
+                # cost_optimizer += time.time() - start
+            # start = time.time()
+            # print('total cost: {:.3f}, nf cost: {:.3f}'.format(cost_loss, sum(self.test['zs_tilde'])))
             if (self.epoch + 1) % 10 == 0:
                 print(datetime.now())
                 print(
@@ -636,20 +668,27 @@ class iVAE(nn.Module):
                         self.epoch + 1, mean(self.iter_logs['loss']), mean(self.iter_logs['loss_recon']),
                         mean(self.iter_logs['loss_clas']), mean(self.iter_logs['loss_kl']),
                         mean(self.iter_logs['loss_spar']), mean(self.iter_logs['loss_mask']), self.best_performance))
-                valid_adata.obsm['embed'] = self.embed(valid_data['x'], valid_data['domain']).detach().cpu().numpy()
-                m = metrics(valid_adata, valid_adata, 'domain', 'label', embed='embed', ari_=True,
-                            silhouette_=True, isolated_labels_asw_=True, nmi_=True, pcr_=True, graph_conn_=True).T
-                print(m.mean().mean())
-                sc.tl.tsne(valid_adata, use_rep='embed')
-                sc.pl.tsne(valid_adata, color='domain', title='domain, score=' + str(m.mean().mean()))
-                sc.pl.tsne(valid_adata, color='label', title='label, score=' + str(m.mean().mean()))
+                # valid_adata.obsm['embed'] = self.embed(valid_data['x'], valid_data['domain']).detach().cpu().numpy()
+                # m = metrics(valid_adata, valid_adata, 'domain', 'label', embed='embed', ari_=True,
+                #             silhouette_=True, isolated_labels_asw_=True, nmi_=True, pcr_=True, graph_conn_=True).T
+                # print(m.mean().mean())
+                # sc.tl.tsne(valid_adata, use_rep='embed')
+                # sc.pl.tsne(valid_adata, color='domain', title='domain, score=' + str(m.mean().mean()))
+                # sc.pl.tsne(valid_adata, color='label', title='label, score=' + str(m.mean().mean()))
             self.validate(valid_data)
+            # cost_validate = time.time() - start
+            # start = time.time()
             if self.early_stopping():
                 break
+            # cost_early_stop = time.time() - start
+            # start = time.time()
             if self.epoch >= self.pretrain_epochs:
                 self.update_prototype(train_data.dataset)
-            cost = time.time() - start
-            print('This epoch costs: {:.3f} seconds'.format(cost))
+            # cost_end = time.time() - start
+            # print(
+            #     'Begin costs: {:.3f} seconds, loss costs: {:.3f} seconds, optimizer costs: {:.3f} seconds, validate costs: {:.3f} seconds, early stopping costs: {:.3f} seconds, end costs: {:.3f} seconds'.format(
+            #         cost_begin, cost_loss, cost_optimizer,
+            #         cost_validate, cost_early_stop, cost_end))
 
     @torch.no_grad()
     def validate(self, valid_data):
@@ -695,6 +734,11 @@ class iVAE(nn.Module):
             return torch.concat((zc, zs_tilde), 1)
         else:
             return zc
+
+    def classify(self, data, domain=None):
+        latent = self.embed(data, domain)
+        distances = torch.cdist(latent, self.prototypes)
+        return torch.argmin(distances, dim=1).cpu()
 
 
 def get_frequent_elements(element_list, lb=2):

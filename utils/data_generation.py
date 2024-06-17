@@ -647,7 +647,8 @@ def leaky_ReLU(D, negSlope):
     return leaky1d(D, negSlope)
 
 
-def data_generator_synthetic(domain_dim, c_dim=2, s_dim=2, data_dim=20, Nlayer=2, var_range_l=0.01, var_range_r=1,
+def data_generator_synthetic(domain_dim=5, label_dim=5, c_dim=2, s_dim=2, data_dim=20, Nlayer=2, var_range_l=0.01,
+                             var_range_r=1,
                              mean_range_l=-4, mean_range_r=4, NsegmentObs_train=7500, NsegmentObs_test=0,
                              Nobs_test=4096,
                              varyMean=True, linear_mixing_first=False, source='Gaussian', seed=950127, assumption=True):
@@ -681,7 +682,7 @@ def data_generator_synthetic(domain_dim, c_dim=2, s_dim=2, data_dim=20, Nlayer=2
     test_size = NsegmentObs_test * domain_dim
     NsegmentObs_total = NsegmentObs_train + NsegmentObs_test
     Nobs = train_size + test_size  # total number of observations
-    labels = np.array([0] * Nobs)  # labels for each observation (populate below)
+    domains = np.array([0] * Nobs)  # domains for each observation (populate below)
 
     # generate data, which we will then modulate in a non-stationary manner:
     if source == 'Laplace':
@@ -693,12 +694,17 @@ def data_generator_synthetic(domain_dim, c_dim=2, s_dim=2, data_dim=20, Nlayer=2
     else:
         raise Exception("wrong source distribution")
 
+    # generate labels
+    A = np.random.uniform(low=-1, high=1, size=(dat.shape[1], label_dim))
+    y = np.argmax(np.dot(dat, A), axis=1)
+
     # get modulation parameters
     modMat = randomstate.uniform(var_range_l, var_range_r, (s_dim, domain_dim))
     if varyMean:
         meanMat = randomstate.uniform(mean_range_l, mean_range_r, (s_dim, domain_dim))
     else:
         meanMat = np.zeros((s_dim, domain_dim))
+
     # now we are ready to apply the non-linear mixtures:
     mixedDat = np.copy(dat)
 
@@ -707,7 +713,7 @@ def data_generator_synthetic(domain_dim, c_dim=2, s_dim=2, data_dim=20, Nlayer=2
         segID = range(NsegmentObs_total * seg, NsegmentObs_total * (seg + 1))
         mixedDat[segID, -s_dim:] = np.multiply(mixedDat[segID, -s_dim:], modMat[:, seg])
         mixedDat[segID, -s_dim:] = np.add(mixedDat[segID, -s_dim:], meanMat[:, seg])
-        labels[segID] = seg
+        domains[segID] = seg
 
     # generate mixing matrices:
     if linear_mixing_first:
@@ -729,11 +735,14 @@ def data_generator_synthetic(domain_dim, c_dim=2, s_dim=2, data_dim=20, Nlayer=2
         mixedDat = np.dot(mixedDat, A)
 
     # stratified split
-    x_train, x_test, z_train, z_test, u_train, u_test = train_test_split(mixedDat, dat, labels, train_size=train_size,
-                                                                         test_size=test_size, random_state=randomstate,
-                                                                         stratify=labels)
+    x_train, x_test, z_train, z_test, u_train, u_test, y_train, y_test = train_test_split(mixedDat, dat, domains, y,
+                                                                                          train_size=train_size,
+                                                                                          test_size=test_size,
+                                                                                          random_state=randomstate,
+                                                                                          stratify=domains)
 
-    return {"source": z_train, "x": x_train, "domain": u_train}, {"source": z_test, "x": x_test, "domain": u_test}
+    return {"source": z_train, "x": x_train, "domain": u_train, 'y': y_train}, {"source": z_test, "x": x_test,
+                                                                                "domain": u_test, 'y': y_test}
 
 
 def gen_da_data_ortho(domain_dim, c_dim=2, s_dim=2, data_dim=20, Nlayer=2, var_range_l=0.01, var_range_r=1,
