@@ -67,34 +67,31 @@ class VAE_MLP(nn.Module):
 
         # encoder
         self.encoder = nn.Sequential()
-        self.encoder.add_module(name="Input L", module=nn.Linear(data_dim, hidden_dim))
-        self.encoder.add_module(name="Input A", module=nn.LeakyReLU(.2))
-        for i in range(n_layers):
-            self.encoder.add_module(name="L{:d}".format(i), module=nn.Linear(hidden_dim, hidden_dim))
+        layer_sizes = [data_dim] + [hidden_dim] * n_layers
+        for i, (in_size, out_size) in enumerate(zip(layer_sizes[:-1], layer_sizes[1:])):
+            self.encoder.add_module(name="L{:d}".format(i), module=nn.Linear(in_size, out_size))
             if normalization == 'batch':
-                self.encoder.add_module(name="N{:d}".format(i), module=nn.BatchNorm1d(hidden_dim))
+                self.encoder.add_module(name="N{:d}".format(i), module=nn.BatchNorm1d(out_size))
             elif normalization == 'layer':
-                self.encoder.add_module(name="N{:d}".format(i),
-                                        module=nn.LayerNorm(hidden_dim, elementwise_affine=False))
-            self.encoder.add_module(name="A{:d}".format(i), module=nn.LeakyReLU(.2))
+                self.encoder.add_module(name="N{:d}".format(i), module=nn.LayerNorm(out_size, elementwise_affine=False))
+            self.encoder.add_module(name="A{:d}".format(i), module=nn.ReLU())
             if dropout > 0:
                 self.encoder.add_module(name="D{:d}".format(i), module=nn.Dropout(p=dropout))
-        self.encoder.add_module(name='Output', module=nn.Linear(hidden_dim, latent_dim * 2))
+        self.encoder.add_module(name="Output", module=nn.Linear(layer_sizes[-1], latent_dim * 2))
 
-        # Fix the functional form to ground-truth mixing function
+        # decoder
         self.decoder = nn.Sequential()
-        self.decoder.add_module(name="Input L", module=nn.Linear(latent_dim, hidden_dim))
-        self.decoder.add_module(name="Input A", module=nn.LeakyReLU(.2))
-        for i in range(n_layers):
-            self.decoder.add_module(name="L{:d}".format(i), module=nn.Linear(hidden_dim, hidden_dim))
+        layer_sizes = [latent_dim] + [hidden_dim] * n_layers
+        for i, (in_size, out_size) in enumerate(zip(layer_sizes[:-1], layer_sizes[1:])):
+            self.decoder.add_module(name="L{:d}".format(i), module=nn.Linear(in_size, out_size, bias=False))
             if normalization == 'batch':
-                self.decoder.add_module(name="N{:d}".format(i), module=nn.BatchNorm1d(hidden_dim))
+                self.decoder.add_module(name="N{:d}".format(i), module=nn.BatchNorm1d(out_size))
             elif normalization == 'layer':
-                self.decoder.add_module(name="N{:d}".format(i),
-                                        module=nn.LayerNorm(hidden_dim, elementwise_affine=False))
-            self.decoder.add_module(name="A{:d}".format(i), module=nn.LeakyReLU(.2))
+                self.decoder.add_module(name="N{:d}".format(i), module=nn.LayerNorm(out_size, elementwise_affine=False))
+            self.decoder.add_module(name="A{:d}".format(i), module=nn.ReLU())
             if dropout > 0:
                 self.decoder.add_module(name="D{:d}".format(i), module=nn.Dropout(p=dropout))
+
         if recon_loss == 'zinb':
             self.decoder.add_module(name="Output", module=nn.Linear(hidden_dim, data_dim * 2))
         elif recon_loss == 'mse':
@@ -466,12 +463,9 @@ class iVAE(nn.Module):
         self.best_state_dict = None
         self.data_dim = data_dim
         self.latent_dim = latent_dim
-        if s_prop > 1 or s_prop < 0:
-            raise ValueError('s_prop must be between 0 and 1')
-        else:
-            self.s_prop = s_prop
-            self.s_dim = round(latent_dim * s_prop)
-            self.c_dim = latent_dim - self.s_dim
+        assert 0 <= round(latent_dim * s_prop) < latent_dim, 's_prop must be between 0 and 1'
+        self.s_dim = round(latent_dim * s_prop)
+        self.c_dim = latent_dim - self.s_dim
         self.domain_dim = domain_dim
         self.label_dim = label_dim
         self.embedding_dim = embedding_dim
@@ -489,8 +483,9 @@ class iVAE(nn.Module):
         self.lambda_mask = lambda_mask
         self.lambda_kl = lambda_kl
         self.lambda_clas = lambda_clas
+        assert patient > 0, 'patient must be greater than zero'
         self.patient = patient
-        assert 0 < valid_prop < 1, 'valid proportion must be between 0 and 1'
+        assert 0 <= valid_prop < 1, 'valid proportion must be between 0 and 1'
         self.valid_prop = valid_prop
         self.batch_size = batch_size
         self.epoch = 0
@@ -501,30 +496,31 @@ class iVAE(nn.Module):
         self.net = VAE_MLP(data_dim=data_dim, latent_dim=latent_dim, c_dim=self.c_dim, hidden_dim=self.hidden_dim,
                            n_layers=n_layers, normalization=normalisation, dropout=dr_rate, recon_loss=recon_loss,
                            device=self.device).to(self.device)
-        if flows == 'quadraticspline':
-            self.domain_embedding = nn.Embedding(self.domain_dim, self.embedding_dim, device=self.device)
-        self.flows = flows
-        if flows == 'quadraticspline':
-            flows = []
-            for i in range(flows_n_layers):
-                flows += [nf.flows.AutoregressiveRationalQuadraticSpline(self.s_dim, 2, self.hidden_dim,
-                                                                         num_context_channels=self.embedding_dim),
-                          nf.flows.LULinearPermute(self.s_dim)]
-            self.domain_flows = nf.ConditionalNormalizingFlow(
-                nf.distributions.DiagGaussian(self.s_dim, trainable=False).to(self.device), flows).to(self.device)
-        elif flows == 'spline':
-            # Spline flow model to learn the noise distribution
-            self.domain_flows = []
-            for i in range(self.domain_dim):
-                spline = NormalizingFlow(input_dim=self.s_dim, n_layers=flows_n_layers, bound=5, count_bins=8,
-                                         order='linear')
-                self.domain_flows.append(spline)
-            self.domain_flows = nn.ModuleList(self.domain_flows).to(self.device)
-        else:
-            self.domain_flows = None
+        if flows is not None and self.s_dim > 0:
+            if flows == 'quadraticspline':
+                self.domain_embedding = nn.Embedding(self.domain_dim, self.embedding_dim, device=self.device)
+            self.flows = flows
+            if flows == 'quadraticspline':
+                flows = []
+                for i in range(flows_n_layers):
+                    flows += [nf.flows.AutoregressiveRationalQuadraticSpline(self.s_dim, 2, self.hidden_dim,
+                                                                             num_context_channels=self.embedding_dim),
+                              nf.flows.LULinearPermute(self.s_dim)]
+                self.domain_flows = nf.ConditionalNormalizingFlow(
+                    nf.distributions.DiagGaussian(self.s_dim, trainable=False).to(self.device), flows).to(self.device)
+            elif flows == 'spline':
+                # Spline flow model to learn the noise distribution
+                self.domain_flows = []
+                for i in range(self.domain_dim):
+                    spline = NormalizingFlow(input_dim=self.s_dim, n_layers=flows_n_layers, bound=5, count_bins=8,
+                                             order='linear')
+                    self.domain_flows.append(spline)
+                self.domain_flows = nn.ModuleList(self.domain_flows).to(self.device)
+            else:
+                self.domain_flows = None
 
-        self.prior_dist_zs = MultivariateNormal(torch.zeros(self.s_dim, device=self.device),
-                                                torch.eye(self.s_dim, device=self.device))
+            self.prior_dist_zs = MultivariateNormal(torch.zeros(self.s_dim, device=self.device),
+                                                    torch.eye(self.s_dim, device=self.device))
         self.importance = nn.Parameter(torch.ones((1, self.c_dim)))
         self.full_embedding = full_embedding
         if full_embedding:
@@ -533,7 +529,9 @@ class iVAE(nn.Module):
             self.prototypes = torch.zeros(label_dim, self.c_dim, device=self.device)
 
     def nf(self, z, domain):
-        if self.flows == 'quadraticspline':
+        if self.flows is None or self.s_dim == 0:
+            return z, None
+        elif self.flows == 'quadraticspline':
             domain_embed = self.domain_embedding(domain)
             tilde_zs, logdet = self.domain_flows.inverse_and_log_det(z, domain_embed)
         elif self.flows == 'spline':
@@ -543,19 +541,16 @@ class iVAE(nn.Module):
                 index = domain == id
                 tilde_zs[index, :], logdet[index] = self.domain_flows[id](z[index])
         else:
-            return z, None
+            raise Exception('Unknown flows type: ' + self.flows)
         return tilde_zs, logdet
 
     def loss(self, x, domain, label=None):
         if self.recon_loss in ['nb', 'zinb']:
             x = torch.log(x + 1)
         domain = domain.type(torch.int64)
-        # domain = domain[label > -1]
-        # x = x[label > -1, :]
-        if self.c_dim > 0 and self.lambda_spar > 0:
-            x_recon, mu, logvar, z, jacobian_matrix = self.net(x, jacobian_computation=True)
-        else:
-            x_recon, mu, logvar, z, jacobian_matrix = self.net(x, jacobian_computation=False)
+        domain = domain[label > -1]
+        x = x[label > -1, :]
+        x_recon, mu, logvar, z, jacobian_matrix = self.net(x, True if self.lambda_spar > 0 else False)
         q_dist = Normal(mu, torch.exp(logvar / 2))
         log_qz = q_dist.log_prob(z)
 
@@ -633,15 +628,17 @@ class iVAE(nn.Module):
         dataset = DatasetVAE(adata, domain_name, label_name)
         train_data, valid_data = random_split(dataset, [1 - self.valid_prop, self.valid_prop])
         train_loader = DataLoader(train_data, shuffle=True, batch_size=self.batch_size, num_workers=self.num_workers)
-        valid_data = valid_data.dataset[valid_data.indices]
-        valid_adata = anndata.AnnData(valid_data['x'].numpy())
-        valid_adata.obs['domain'] = valid_data['domain'].numpy()
-        valid_adata.obs['domain'] = valid_adata.obs.domain.astype('category')
-        valid_adata.obs['label'] = valid_data['label']
-        valid_adata.obs['label'] = valid_adata.obs.label.astype('category')
+        if self.valid_prop > 0:
+            valid_data = valid_data.dataset[valid_data.indices]
+            valid_adata = anndata.AnnData(valid_data['x'].numpy())
+            valid_adata.obs['domain'] = valid_data['domain'].numpy()
+            valid_adata.obs['domain'] = valid_adata.obs.domain.astype('category')
+            valid_adata.obs['label'] = valid_data['label']
+            valid_adata.obs['label'] = valid_adata.obs.label.astype('category')
         # train_loader = DataLoader(data, shuffle=True, batch_size=self.batch_size)
-        optimizer = torch.optim.AdamW(filter(lambda p: p.requires_grad, self.parameters()), lr=self.lr,
-                                      betas=(0.9, 0.999), weight_decay=0.0001)
+        # optimizer = torch.optim.AdamW(filter(lambda p: p.requires_grad, self.parameters()), lr=self.lr,
+        #                               betas=(0.9, 0.999), weight_decay=0.0001)
+        optimizer = torch.optim.Adam(self.parameters(), lr=self.lr, eps=.01, weight_decay=.04)
         for self.epoch in range(self.max_epochs):
             # start = time.time()
             if self.epoch == self.pretrain_epochs and self.lambda_clas > 0:
@@ -679,11 +676,11 @@ class iVAE(nn.Module):
                 # sc.tl.tsne(valid_adata, use_rep='embed')
                 # sc.pl.tsne(valid_adata, color='domain', title='domain, score=' + str(m.mean().mean()))
                 # sc.pl.tsne(valid_adata, color='label', title='label, score=' + str(m.mean().mean()))
-            self.validate(valid_data)
-            # cost_validate = time.time() - start
-            # start = time.time()
-            if self.early_stopping():
-                break
+            if self.valid_prop > 0:
+                self.validate(valid_data)
+                if self.early_stopping():
+                    break
+
             # cost_early_stop = time.time() - start
             # start = time.time()
             if self.epoch >= self.pretrain_epochs:

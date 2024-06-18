@@ -17,7 +17,9 @@ from torch.utils.data import DataLoader
 from model.model import iVAE_flow_unsupervised, iVAE
 from utils.utils import TrainDataset, DatasetVAE
 
-dataset = ['pancreas', 'immune', 'lung', 'brain']
+random.seed(0)
+latent_dim = 10
+dataset = ['lung', 'immune', 'pancreas', 'brain']
 batch_dict = {'lung': 'batch', 'immune': 'batch', 'pancreas': 'study', 'brain': 'study', 'tumor': 'source'}
 label_dict = {'lung': 'cell_type', 'immune': 'final_annotation', 'pancreas': 'cell_type', 'brain': 'cell_type',
               'tumor': 'cell_type'}
@@ -36,30 +38,24 @@ for data_name in dataset:
         train_data = adata.copy()
         target_domain = random.sample(adata.obs[batch].unique().tolist(), round(adata.obs[batch].nunique() * qp))
         adata.obs['query'] = [True if d in target_domain else False for d in adata.obs[batch]]
+        source_adata = adata[~adata.obs['query']].copy()
+        target_adata = adata[adata.obs['query']].copy()
 
         if model_name == 'scpoli':
-            source_adata = adata[~adata.obs['query']].copy()
-            target_adata = adata[adata.obs['query']].copy()
-
-            train_data = TrainDataset(source_adata, batch, label)
-            train_loader = DataLoader(train_data, shuffle=True, batch_size=100)
-            scpoli_model = scPoli(adata=source_adata, condition_keys=batch, cell_type_keys=label, embedding_dims=5,
-                                  latent_dim=10, hidden_layer_sizes=[32], inject_condition=[])
-            scpoli_model.train(eta=10, n_epochs=50, pretraining_epochs=50)
-            scpoli_query = scPoli.load_query_data(adata=target_adata, reference_model=scpoli_model,
-                                                  labeled_indices=[])
-            scpoli_query.train(eta=10, n_epochs=50, pretraining_epochs=50)
-
-            scpoli_query.model.eval()
+            model = scPoli(adata=source_adata, condition_keys=batch, cell_type_keys=label, embedding_dims=5,
+                           latent_dim=latent_dim, hidden_layer_sizes=[32], inject_condition=[])
+            model.train(eta=10, n_epochs=50, pretraining_epochs=50)
+            model = scPoli.load_query_data(adata=target_adata, reference_model=model, labeled_indices=[])
+            model.train(eta=10, n_epochs=1, pretraining_epochs=1)
+            model.model.eval()
             # get latent representation of query data
-            target_adata.obsm[model_name] = scpoli_query.get_latent(target_adata)
+            target_adata.obsm[model_name] = model.get_latent(target_adata)
         elif model_name == 'yang':
-            target_adata = adata[adata.obs['query']].copy()
             train_data.obs.loc[adata.obs['query'], label] = np.nan
-            model = iVAE(latent_dim=10, s_prop=.2, data_dim=adata.shape[1], domain_dim=adata.obs[batch].nunique(),
-                         label_dim=adata.obs[label].nunique(), embedding_dim=5, dr_rate=0.05, hidden_dim=32, n_layers=0,
-                         flows_n_layers=4, max_epochs=100, learning_rate=1e-3, recon_loss='nb', normalisation='layer',
-                         lambda_kl=1, lambda_clas=10, lambda_spar=0, lambda_mask=0, patient=10, valid_prop=.1,
+            model = iVAE(latent_dim=latent_dim, s_prop=0, data_dim=adata.shape[1], domain_dim=adata.obs[batch].nunique(),
+                         label_dim=adata.obs[label].nunique(), embedding_dim=5, dr_rate=0.05, hidden_dim=32, n_layers=1,
+                         flows_n_layers=4, max_epochs=50, learning_rate=1e-3, recon_loss='nb', normalisation='layer',
+                         lambda_kl=1, lambda_clas=10, lambda_spar=0, lambda_mask=0, patient=10, valid_prop=0,
                          batch_size=128, pretrain_epoch_rate=1, full_embedding=True, flows=None)
             model.fit(train_data, batch, label)
             # get latent representation of query data
@@ -71,7 +67,8 @@ for data_name in dataset:
         m = metrics(target_adata, target_adata, batch, label, embed=model_name, ari_=True, silhouette_=True,
                     isolated_labels_asw_=True, nmi_=True, pcr_=True, graph_conn_=True).T
         print(m.mean().mean())
+        sc.settings.figdir = ''
         sc.tl.tsne(target_adata, use_rep=model_name)
-        sc.pl.tsne(target_adata, color=batch)
-        sc.pl.tsne(target_adata, color=label)
+        sc.pl.tsne(target_adata, color=batch, save='_batch.pdf')
+        sc.pl.tsne(target_adata, color=label, save='_label.pdf')
         a = 1
